@@ -2,12 +2,13 @@
 
 
 #define NUM_CHANNELS 2
-#define POWER_DELAY 300
+#define POWER_DELAY 300 //time to wait until for relais to stabilize (debounce)
 
 #define POWER_PIN 2
-#define UP_PIN 3
-#define DOWN_PIN 4 
-#define DMX_TIMEOUT 150000 //in ms
+#define DIR_PIN_1 3
+#define DIR_PIN_2 4 
+
+#define DMX_TIMEOUT 150000 //in iterations
 
 
 
@@ -23,6 +24,12 @@ enum Command
   CMD_OFF,
   CMD_UP,
   CMD_DOWN 
+};
+
+enum Direction
+{
+  DIR_UP,
+  DIR_DOWN
 };
 
 
@@ -43,11 +50,9 @@ Command getCommand(uint8_t channelOn, uint8_t channelDir);
 /** Turn power relai on/off */
 void setPower(bool on);
 
-/** Turn up relais on/off */
-void setUp(bool on);
+/** set direction relais */
+void setDirection(Direction dir);
 
-/* Turn down relais on/off */
-void setDown(bool on);
 
 /** Error handler. Turn relais of and freeze mcu */
 void error();
@@ -57,9 +62,13 @@ void onFrameReceiveComplete();
 
 
 DMX_Slave dmxSlave(NUM_CHANNELS);
-State state = STATE_OFF;
-bool frameReceived = false;
-unsigned long iterationsSinceLastPacket = 0;
+
+State state = STATE_OFF; //internal state of the state machine
+
+bool frameReceived = false; //false until we receive at least one frame
+unsigned long iterationsSinceLastPacket = 0; //ghetto timer indicating iterations since last dmx packet received
+
+Command currentCommand; //command currently executed by the sate machine
 
 void setup() {
   frameReceived = false;
@@ -71,42 +80,48 @@ void setup() {
   //this block has to happen before pinmodes are set, otherwise pins will be on for a short time!
   setPower(false);
   delay(POWER_DELAY);
-  setUp(false);
-  setDown(false);
+  setDirection(DIR_UP);
   state = STATE_OFF;
+  currentCommand = CMD_OFF;
   
-  pinMode(2, OUTPUT);
-  pinMode(3, OUTPUT);
-  pinMode(4, OUTPUT);
+  pinMode(POWER_PIN, OUTPUT);
+  pinMode(DIR_PIN_1, OUTPUT);
+  pinMode(DIR_PIN_2, OUTPUT);
 
 }
-
 
 // the loop function runs over and over again forever
 void loop() 
 { 
-  //do nothing until we receive at least one good dmx frame
-  if(!frameReceived)     
-    return;
+  //only update cmd if a complete frame has been received
+  if(frameReceived)
+  {
+    frameReceived = false;
+    iterationsSinceLastPacket = 0;
+    const uint8_t channelDir = dmxSlave.getChannelValue(2);
+    const uint8_t channelOn = dmxSlave.getChannelValue(1);
+    currentCommand = getCommand(channelOn, channelDir);  
+  }
 
-  //FIXME !!!!
   //this is a  HACK to count cycles since last dmx packet received. Cannot use millis() because it breaks the dmx library... too lazy to use another timer just count iterations for now
   ++iterationsSinceLastPacket;
   
-  const uint8_t channelOn = dmxSlave.getChannelValue(1);
-  const uint8_t channelDir = dmxSlave.getChannelValue(2);
-  Command cmd = getCommand(channelOn, channelDir);
- 
+  //turn motor off if dmx is disconnected
+  if(iterationsSinceLastPacket > DMX_TIMEOUT)
+  {
+    return currentCommand = CMD_OFF;
+  }
+  
   switch(state)
   {
     case STATE_OFF:
-      off(cmd);
+      off(currentCommand);
       break;
     case STATE_UP:
-      up(cmd);
+      up(currentCommand);
       break;
     case STATE_DOWN:
-      down(cmd);
+      down(currentCommand);
       break;
     default:
       error();
@@ -114,28 +129,29 @@ void loop()
 }
 
 void off(Command cmd)
-{
+{ 
   switch(cmd)
   {
     case CMD_OFF:
       //nothing to do, are already in off
       return;
+      
     case CMD_UP:
-      setUp(true);
-      setDown(false);
+      setDirection(DIR_UP);
       delay(POWER_DELAY);
       setPower(true);
       delay(POWER_DELAY);
       state = STATE_UP;
       return;
+      
     case CMD_DOWN:
-      setDown(true);
-      setUp(false);
+      setDirection(DIR_DOWN);
       delay(POWER_DELAY);
       setPower(true);
       delay(POWER_DELAY);
       state = STATE_DOWN;
       return;
+
     default:
       error();  
   }
@@ -174,11 +190,8 @@ void down(Command cmd)
 
 void goToOff()
 {
-  //switch of power first, wait, then switch off direction relais
+  //just switch off power, direction relais stay on
   setPower(false);
-  delay(POWER_DELAY);
-  setUp(false);
-  setDown(false);
   delay(POWER_DELAY);
   state = STATE_OFF;  
 }
@@ -199,12 +212,6 @@ void error()
 
 Command getCommand(uint8_t channelOn, uint8_t channelDir)
 { 
-  //turn motor off if dmx is disconnected
-  if(iterationsSinceLastPacket > DMX_TIMEOUT)
-  {
-    return CMD_OFF;
-  }
-  
   if(channelOn > 128)
   {
     if(channelDir < 50)
@@ -245,33 +252,25 @@ void setPower(bool on)
   }
 }
 
-void setUp(bool on)
+void setDirection(Direction dir)
 {
-  if(!on)
+  switch(dir)
   {
-      digitalWrite(UP_PIN, HIGH);
-  }
-  else
-  {
-      digitalWrite(UP_PIN, LOW);
-  }  
+    case DIR_UP:
+      digitalWrite(DIR_PIN_1, HIGH);
+      digitalWrite(DIR_PIN_2, HIGH);
+      return;
+    case DIR_DOWN:
+      digitalWrite(DIR_PIN_1, LOW);
+      digitalWrite(DIR_PIN_2, LOW);
+      return;
+    default:
+      error();
+  } 
 }
 
-void setDown(bool on)
-{
-  if(!on)
-  {
-      digitalWrite(DOWN_PIN, HIGH);
-  }
-  else
-  {
-      digitalWrite(DOWN_PIN, LOW);
-  }  
-}
 
 void onFrameReceiveComplete(unsigned short channelsReceived)
 {
   frameReceived = true;
-  iterationsSinceLastPacket = 0;
-  //lastFrameReceivedTime = millis();
 }
